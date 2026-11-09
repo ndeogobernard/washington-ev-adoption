@@ -1,5 +1,7 @@
 # Electric Vehicle Adoption in Washington State
 
+![Project overview](assets/social-preview.png)
+
 A data science project on electric vehicle adoption across Washington State: whether location and model
 year predict if a registered EV is fully battery-electric, and which adoption profiles exist across ZIP
 codes. It combines classification models with k-means clustering on about 300,000 registered EVs.
