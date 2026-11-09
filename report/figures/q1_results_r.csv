@@ -1,0 +1,4 @@
+"model","cv_auc","test_auc","balanced_accuracy","bev_recall","bev_precision","bev_f1","phev_recall"
+"Logistic regression","0.616 +/- 0.007",0.62,0.582,0.61,0.85,0.71,0.555
+"Decision tree","0.637 +/- 0.005",0.639,0.612,0.656,0.863,0.745,0.568
+"Random forest","0.646 +/- 0.007",0.651,0.609,0.69,0.859,0.765,0.528

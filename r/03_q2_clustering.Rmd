@@ -1,0 +1,122 @@
+---
+title: "Part 3: Question 2, EV-Adoption Profiles of Washington ZIP Codes"
+subtitle: "Personal project: Electric Vehicle Adoption in Washington State"
+author: "Bernard Issifu"
+output:
+  html_document:
+    toc: true
+    df_print: kable
+---
+
+**Question 2.** What distinct EV-adoption profiles exist across Washington ZIP codes?
+
+Uses the cleaned data from Part 1. The Python version is `python/03_q2_clustering.ipynb`.
+
+```{r setup, message = FALSE}
+# ---- Setup ----
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(cluster)
+
+theme_set(theme_minimal())
+knitr::opts_chunk$set(fig.width = 8, fig.height = 4.5)
+df <- read.csv("../data/processed/ev_clean_r.csv", stringsAsFactors = FALSE,
+               colClasses = c(zip = "character"))
+```
+
+# 1. Approach
+
+As in Python: each ZIP code with at least 50 EVs is described by `log_evs` (log10 number of EVs),
+`bev_share`, `tesla_share`, `recent_share` (model year 2023+) and `brand_entropy` (Shannon entropy of
+makes); features are standardized and grouped with k-means (20 random starts), choosing k with the
+elbow and silhouette methods.
+
+```{r zips}
+entropy <- function(x) { p <- table(x) / length(x); -sum(p * log(p)) }
+mode_of <- function(x) names(sort(table(x), decreasing = TRUE))[1]
+zips <- df %>% group_by(zip) %>%
+  summarise(evs = n(), bev_share = mean(bev), tesla_share = mean(tesla),
+            recent_share = mean(model_year >= 2023), brand_entropy = entropy(Make),
+            region = mode_of(region), city = mode_of(City), .groups = "drop")
+cat("ZIP codes:", nrow(zips), "; with at least 50 EVs:", sum(zips$evs >= 50), "\n")
+zips <- zips %>% filter(evs >= 50) %>% mutate(log_evs = log10(evs))
+features <- c("log_evs", "bev_share", "tesla_share", "recent_share", "brand_entropy")
+X <- scale(zips[, features])
+round(cor(zips[, features]), 2)
+```
+
+# 2. Choosing the number of clusters
+
+```{r choose-k}
+set.seed(42)
+d <- dist(X)
+choose <- do.call(rbind, lapply(2:8, function(k) {
+  km <- kmeans(X, centers = k, nstart = 20, iter.max = 100)
+  data.frame(k = k, inertia = km$tot.withinss, silhouette = mean(silhouette(km$cluster, d)[, 3]))
+}))
+choose %>% pivot_longer(-k) %>%
+  ggplot(aes(k, value)) + geom_line() + geom_point() + facet_wrap(~ name, scales = "free_y") +
+  labs(title = "Elbow (inertia) and Average Silhouette Width", x = "Number of clusters k", y = "Value")
+round(choose, 3)
+```
+
+As in Python, the silhouette is highest at k = 2 and nearly flat from 3 to 8, so **k = 4** is chosen
+for interpretability.
+
+# 3. The four profiles
+
+```{r profiles}
+set.seed(42)
+km <- kmeans(X, centers = 4, nstart = 20, iter.max = 100)
+zips$cluster <- km$cluster
+prof <- zips %>% group_by(cluster) %>%
+  summarise(zip_codes = n(), median_evs = median(evs), total_evs = sum(evs),
+            bev_share = mean(bev_share), tesla_share = mean(tesla_share),
+            recent_share = mean(recent_share), brand_entropy = mean(brand_entropy),
+            seattle_metro = mean(region == "Seattle metro"), eastern_wa = mean(region == "Eastern WA"))
+
+# Same naming rules as Python: the two clusters with the most EVs are 'large'
+large <- prof$cluster[order(-prof$median_evs)][1:2]
+small <- setdiff(prof$cluster, large)
+pl <- prof[prof$cluster %in% large, ]; ps <- prof[prof$cluster %in% small, ]
+names_map <- setNames(rep("", 4), prof$cluster)
+names_map[as.character(pl$cluster[which.max(pl$tesla_share)])] <- "Tech-suburb Tesla hubs"
+names_map[as.character(pl$cluster[which.min(pl$tesla_share)])] <- "Diverse urban and suburban"
+names_map[as.character(ps$cluster[which.min(ps$bev_share)])] <- "PHEV-leaning mixed fleets"
+names_map[as.character(ps$cluster[which.max(ps$bev_share)])] <- "Small eastern Tesla-leaning"
+zips$profile <- names_map[as.character(zips$cluster)]
+prof$profile <- names_map[as.character(prof$cluster)]
+prof %>% select(profile, everything(), -cluster) %>% arrange(desc(median_evs)) %>%
+  mutate(across(where(is.double), ~ round(.x, 3)))
+```
+
+```{r heatmap}
+heat <- as.data.frame(X) %>% mutate(profile = zips$profile) %>% group_by(profile) %>%
+  summarise(across(everything(), mean)) %>% pivot_longer(-profile)
+ggplot(heat, aes(name, profile, fill = value)) + geom_tile() +
+  geom_text(aes(label = sprintf("%.2f", value)), size = 3) +
+  scale_fill_gradient2(low = "steelblue", mid = "white", high = "firebrick") +
+  labs(title = "Cluster Profiles (mean z-score)", x = "Feature", y = "Profile", fill = "z")
+```
+
+```{r compare}
+# Compare with the Python cluster assignment
+py <- read.csv("../report/figures/q2_zip_profiles_python.csv", colClasses = c(zip = "character"))
+cmp <- merge(zips[, c("zip", "profile")], py[, c("zip", "profile")], by = "zip", suffixes = c("_r", "_python"))
+agree <- mean(cmp$profile_r == cmp$profile_python)
+table(R = cmp$profile_r, Python = cmp$profile_python)
+write.csv(prof, "../report/figures/q2_profiles_r.csv", row.names = FALSE)
+```
+
+# 4. Discussion
+
+R finds the same four profiles as Python: the same profile is assigned to
+`r sprintf("%.1f%%", 100 * agree)` of the `r nrow(cmp)` ZIP codes. The **Tech-suburb Tesla hubs** have
+the largest fleets and the highest BEV
+(`r round(prof$bev_share[prof$profile == "Tech-suburb Tesla hubs"], 3)`) and Tesla shares; the
+**Diverse urban and suburban** group has large, brand-diverse fleets; the **PHEV-leaning mixed fleets**
+have the lowest BEV share (`r round(prof$bev_share[prof$profile == "PHEV-leaning mixed fleets"], 3)`);
+and the **Small eastern Tesla-leaning** group combines small, older fleets with a high Tesla share
+(`r round(prof$tesla_share[prof$profile == "Small eastern Tesla-leaning"], 3)`). As in Python, the
+silhouette is modest, so the profiles are tendencies rather than sharply separated groups.

@@ -1,0 +1,5 @@
+cluster,zip_codes,median_evs,total_evs,bev_share,tesla_share,recent_share,brand_entropy,seattle_metro,eastern_wa
+Tech-suburb Tesla hubs,54,1901.5,110724,0.861,0.485,0.676,2.05,0.907,0.037
+Diverse urban and suburban,127,1013.0,143034,0.782,0.36,0.607,2.46,0.535,0.126
+PHEV-leaning mixed fleets,81,206.0,26490,0.724,0.263,0.582,2.495,0.16,0.272
+Small eastern Tesla-leaning,76,145.5,15937,0.793,0.422,0.557,2.164,0.211,0.487

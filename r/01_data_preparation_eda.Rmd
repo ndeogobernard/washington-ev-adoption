@@ -1,0 +1,159 @@
+---
+title: "Part 1: Data Preparation and Exploratory Analysis"
+subtitle: "Personal project: Electric Vehicle Adoption in Washington State"
+author: "Bernard Issifu"
+output:
+  html_document:
+    toc: true
+    df_print: kable
+---
+
+```{r setup, message = FALSE}
+# ---- Setup ----
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+theme_set(theme_minimal())
+knitr::opts_chunk$set(fig.width = 9, fig.height = 4.5)
+```
+
+This document introduces the dataset, cleans it, builds the features used later, and explores how
+EV adoption varies over time and across Washington. The same steps are implemented in Python in
+`python/01_data_preparation_eda.ipynb`.
+
+# 1. The dataset
+
+The **Electric Vehicle Population Data** (Washington State Department of Licensing, data.wa.gov, Open
+Database License) lists every battery-electric (BEV) and plug-in hybrid (PHEV) vehicle registered with
+the state. This snapshot was last updated on 14 October 2026. The file is stored compressed without the
+partial VIN, DOL vehicle ID and point coordinates.
+
+```{r load}
+# ZIP code, census tract and legislative district are labels, so they are read as text
+raw <- read.csv(gzfile("../data/ev_population.csv.gz"), stringsAsFactors = FALSE,
+                check.names = FALSE, na.strings = "",
+                colClasses = c("Postal Code" = "character", "2020 GEOID" = "character",
+                               "Legislative District" = "character"))
+dim(raw)
+raw %>% count(`Electric Vehicle Type`, name = "vehicles") %>%
+  mutate(percent = round(vehicles / sum(vehicles) * 100, 1))
+```
+
+# 2. Data quality
+
+```{r quality}
+miss <- colSums(is.na(raw))
+miss[miss > 0]
+cat("Vehicles registered outside Washington:", sum(raw$State != "WA"), "\n")
+cat("Share with electric range recorded as 0:", round(mean(raw$`Electric Range` == 0, na.rm = TRUE), 3), "\n")
+raw %>% filter(`Model Year` >= 2015) %>% group_by(`Model Year`) %>%
+  summarise(share_range_0 = round(mean(`Electric Range` == 0, na.rm = TRUE), 2)) %>%
+  pivot_wider(names_from = `Model Year`, values_from = share_range_0)
+```
+
+**Interpretation.** Only a few records lack location fields (mostly vehicles registered outside
+Washington). Electric range is recorded as 0 ("not yet researched") for
+`r sprintf("%.0f%%", 100 * mean(raw$"Electric Range" == 0, na.rm = TRUE))` of vehicles, nearly all from model
+year 2021 onward, so range cannot be used as a feature for recent vehicles.
+
+# 3. Cleaning and feature engineering
+
+```{r clean}
+df <- raw
+steps <- data.frame(step = "Raw data", rows = nrow(df))
+# (1) Washington registrations only
+df <- df %>% filter(State == "WA")
+steps <- rbind(steps, data.frame(step = "Keep Washington registrations", rows = nrow(df)))
+# (2) Drop rows missing location fields
+df <- df %>% filter(!is.na(County), !is.na(`Postal Code`), !is.na(`Electric Utility`),
+                    !is.na(`Legislative District`))
+steps <- rbind(steps, data.frame(step = "Drop rows missing location fields", rows = nrow(df)))
+# (3) Model year 2011 onward
+df <- df %>% filter(`Model Year` >= 2011)
+steps <- rbind(steps, data.frame(step = "Keep model year 2011 onward", rows = nrow(df)))
+steps
+```
+
+```{r features}
+eastern <- c("Adams", "Asotin", "Benton", "Chelan", "Columbia", "Douglas", "Ferry", "Franklin",
+             "Garfield", "Grant", "Kittitas", "Klickitat", "Lincoln", "Okanogan", "Pend Oreille",
+             "Spokane", "Stevens", "Walla Walla", "Whitman", "Yakima")
+df <- df %>%
+  mutate(bev = as.integer(startsWith(`Electric Vehicle Type`, "Battery")),     # (a) outcome
+         region = case_when(County %in% c("King", "Snohomish", "Pierce") ~ "Seattle metro",
+                            County %in% eastern ~ "Eastern WA",
+                            TRUE ~ "Other western WA"),                           # (b) region
+         utility = sub("\\|.*$", "", `Electric Utility`),                        # (d) first utility
+         tesla = as.integer(Make == "TESLA")) %>%                                # (f) Tesla flag
+  group_by(City) %>% mutate(city_evs = n()) %>% ungroup()                        # (c) urbanity proxy
+
+top_util <- names(sort(table(df$utility), decreasing = TRUE))[1:6]
+df$utility <- ifelse(df$utility %in% top_util, df$utility, "Other")
+top_cty <- names(sort(table(df$County), decreasing = TRUE))[1:15]
+df$county_grp <- ifelse(df$County %in% top_cty, df$County, "Other")             # (e) county
+df <- df %>% rename(zip = `Postal Code`, model_year = `Model Year`, leg_district = `Legislative District`)
+
+cat(sprintf("Rows: %d; BEV share after cleaning: %.2f%%\n", nrow(df), 100 * mean(df$bev)))
+sort(table(df$utility), decreasing = TRUE)
+```
+
+# 4. Exploratory analysis
+
+## 4.1 Growth over time and the BEV/PHEV mix
+
+```{r eda-year}
+by_year <- df %>% group_by(model_year) %>% summarise(vehicles = n(), bev_share = round(mean(bev), 3))
+
+df %>% count(model_year, type = ifelse(bev == 1, "BEV", "PHEV")) %>%
+  ggplot(aes(factor(model_year), n, fill = type)) +
+  geom_col() +
+  scale_fill_manual(values = c(BEV = "seagreen", PHEV = "darkorange")) +
+  labs(title = "Registered EVs by Model Year", x = "Model year", y = "Vehicles currently registered",
+       fill = "Type") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5))
+
+ggplot(by_year, aes(model_year, bev_share)) +
+  geom_line(colour = "seagreen") + geom_point(colour = "seagreen") +
+  labs(title = "Battery-Electric Share by Model Year", x = "Model year",
+       y = "Share of vehicles that are BEV")
+by_year
+```
+
+**Interpretation.** Registrations peak at `r format(max(by_year$vehicles), big.mark = ",")` vehicles for
+model year `r by_year$model_year[which.max(by_year$vehicles)]`. The BEV share is erratic for older model
+years and sits around 78–88% from 2019, with a dip for 2024–2025.
+
+## 4.2 Top makes and regions
+
+```{r eda-makes}
+top_makes <- df %>% count(Make, sort = TRUE) %>% head(10)
+ggplot(top_makes, aes(reorder(Make, n), n)) + geom_col(fill = "steelblue") + coord_flip() +
+  labs(title = "Top 10 EV Makes in Washington", x = "Make", y = "Registered vehicles")
+
+reg <- df %>% group_by(region) %>% summarise(vehicles = n(), bev_share = round(mean(bev), 3))
+ggplot(reg, aes(reorder(region, bev_share), bev_share)) + geom_col(fill = "seagreen") + coord_flip() +
+  labs(title = "BEV Share by Region", x = "Region", y = "Share of vehicles that are BEV")
+reg
+df %>% group_by(County) %>% summarise(vehicles = n(), bev_share = round(mean(bev), 3)) %>%
+  arrange(desc(vehicles)) %>% head(15)
+```
+
+**Interpretation.** Tesla holds `r sprintf("%.1f%%", 100 * mean(df$tesla))` of EVs. The Seattle metro has
+`r sprintf("%.1f%%", 100 * mean(df$region == "Seattle metro"))` of all EVs and the highest BEV share
+(`r reg$bev_share[reg$region == "Seattle metro"]`), against
+`r reg$bev_share[reg$region == "Eastern WA"]` in eastern Washington.
+
+```{r save}
+dir.create("../data/processed", showWarnings = FALSE)
+cols <- c("County", "City", "zip", "model_year", "Make", "Model", "Electric Vehicle Type",
+          "Electric Range", "leg_district", "bev", "region", "city_evs", "utility", "county_grp", "tesla")
+write.csv(df[, cols], "../data/processed/ev_clean_r.csv", row.names = FALSE)
+cat("Saved", nrow(df), "rows\n")
+```
+
+# 5. Summary
+
+The cleaned data hold every EV of model year 2011 onward registered in Washington, the same
+`r format(nrow(df), big.mark = ",")` vehicles as the Python version. Question 1 classifies BEV vs PHEV
+from location and time; Question 2 clusters ZIP-code fleet profiles.

@@ -1,0 +1,170 @@
+---
+title: "Part 2: Question 1, Predicting Battery-Electric vs Plug-in Hybrid"
+subtitle: "Personal project: Electric Vehicle Adoption in Washington State"
+author: "Bernard Issifu"
+output:
+  html_document:
+    toc: true
+    df_print: kable
+---
+
+**Question 1.** Can location and time predict whether a registered EV is fully battery-electric (BEV)
+rather than a plug-in hybrid (PHEV)?
+
+Uses the cleaned data from Part 1 (render `01_data_preparation_eda.Rmd` first). The Python version is
+`python/02_q1_classification.ipynb`.
+
+```{r setup, message = FALSE}
+# ---- Setup ----
+library(dplyr)
+library(ggplot2)
+library(rpart)
+library(randomForest)
+library(pROC)
+
+theme_set(theme_minimal())
+knitr::opts_chunk$set(fig.width = 8, fig.height = 5)
+
+df <- read.csv("../data/processed/ev_clean_r.csv", stringsAsFactors = FALSE,
+               colClasses = c(zip = "character", leg_district = "character"))
+df$log_city_evs <- log10(df$city_evs)
+cat(sprintf("Rows: %d; BEV share: %.2f%%\n", nrow(df), 100 * mean(df$bev)))
+```
+
+# 1. Approach
+
+As in Python: features are model year, log10 EVs in the city, region, county group, primary utility and
+legislative district (no make, model, range or incentive eligibility). Numeric features are
+standardized; categorical ones are factors. The logistic regression and tree use class weights; the
+random forest draws balanced samples. The random forest is trained on an 80,000-vehicle subsample of
+the training set and cross-validation uses a 50,000-vehicle subsample. Metrics: ROC-AUC, balanced
+accuracy, BEV recall/precision/F1 and PHEV recall.
+
+```{r split}
+num_cols <- c("model_year", "log_city_evs")
+cat_cols <- c("region", "county_grp", "utility", "leg_district")
+data <- df[, c(num_cols, cat_cols)]
+data[cat_cols] <- lapply(data[cat_cols], factor)
+data$type <- factor(ifelse(df$bev == 1, "BEV", "PHEV"), levels = c("PHEV", "BEV"))
+
+set.seed(42)
+idx <- unlist(lapply(split(seq_len(nrow(data)), data$type), function(i) sample(i, round(0.8 * length(i)))))
+train <- data[idx, ]
+test <- data[-idx, ]
+mu <- sapply(train[num_cols], mean); sdv <- sapply(train[num_cols], sd)
+train[num_cols] <- sweep(sweep(train[num_cols], 2, mu), 2, sdv, "/")
+test[num_cols] <- sweep(sweep(test[num_cols], 2, mu), 2, sdv, "/")
+cat("Training:", nrow(train), " Test:", nrow(test), "\n")
+
+# Sanity check: make alone (without model) already largely determines the type
+mm <- data.frame(make = factor(df$Make), type = data$type)
+mm_tr <- mm[idx, ]; mm_te <- mm[-idx, ]
+mm_te <- mm_te[mm_te$make %in% unique(mm_tr$make), ]
+fit_mm <- glm(type ~ make, data = mm_tr, family = binomial)
+cat(sprintf("Sanity check, make only: test AUC = %.4f\n",
+            as.numeric(auc(mm_te$type, predict(fit_mm, mm_te, type = "response"), quiet = TRUE))))
+```
+
+# 2. Training and evaluation
+
+```{r models}
+wts <- function(y) ifelse(y == "BEV", length(y) / (2 * sum(y == "BEV")), length(y) / (2 * sum(y == "PHEV")))
+fit_predict <- function(m, tr, te) {
+  if (m == "Logistic regression") {
+    f <- glm(type ~ ., data = tr, family = quasibinomial, weights = wts(tr$type))
+    p <- predict(f, te, type = "response")
+  } else if (m == "Decision tree") {
+    f <- rpart(type ~ ., data = tr, weights = wts(tr$type), method = "class",
+               control = rpart.control(maxdepth = 6, minbucket = 200, cp = 0))
+    p <- predict(f, te, type = "prob")[, "BEV"]
+  } else {
+    n_min <- min(table(tr$type))
+    f <- randomForest(type ~ ., data = tr, ntree = 200, nodesize = 50, strata = tr$type,
+                      sampsize = c(n_min, n_min))
+    p <- predict(f, te, type = "prob")[, "BEV"]
+  }
+  list(fit = f, p = p)
+}
+models <- c("Logistic regression", "Decision tree", "Random forest")
+auc_of <- function(y, p) as.numeric(auc(y, p, levels = c("PHEV", "BEV"), direction = "<", quiet = TRUE))
+
+set.seed(1)
+cv_set <- train[sample(nrow(train), 50000), ]
+folds <- integer(nrow(cv_set))
+for (cl in levels(cv_set$type)) { i <- which(cv_set$type == cl); folds[i] <- sample(rep(1:5, length.out = length(i))) }
+cv_auc <- sapply(models, function(m) sapply(1:5, function(k) {
+  r <- fit_predict(m, cv_set[folds != k, ], cv_set[folds == k, ]); auc_of(cv_set$type[folds == k], r$p)
+}))
+
+set.seed(42)
+rf_rows <- sample(nrow(train), 80000)
+fits <- lapply(setNames(models, models), function(m)
+  fit_predict(m, if (m == "Random forest") train[rf_rows, ] else train, test))
+
+results <- do.call(rbind, lapply(models, function(m) {
+  p <- fits[[m]]$p; pred <- ifelse(p >= 0.5, "BEV", "PHEV"); y <- test$type
+  rec_b <- mean(pred[y == "BEV"] == "BEV"); rec_p <- mean(pred[y == "PHEV"] == "PHEV")
+  prec_b <- mean(y[pred == "BEV"] == "BEV")
+  data.frame(model = m, cv_auc = sprintf("%.3f +/- %.3f", mean(cv_auc[, m]), sd(cv_auc[, m])),
+             test_auc = round(auc_of(y, p), 3), balanced_accuracy = round((rec_b + rec_p) / 2, 3),
+             bev_recall = round(rec_b, 3), bev_precision = round(prec_b, 3),
+             bev_f1 = round(2 * rec_b * prec_b / (rec_b + prec_b), 3), phev_recall = round(rec_p, 3))
+}))
+results
+```
+
+```{r roc, fig.width = 6.5, fig.height = 5.5}
+roc_df <- do.call(rbind, lapply(models, function(m) {
+  r <- roc(test$type, fits[[m]]$p, levels = c("PHEV", "BEV"), direction = "<", quiet = TRUE)
+  data.frame(model = sprintf("%s (AUC = %.3f)", m, as.numeric(r$auc)), fpr = 1 - r$specificities,
+             tpr = r$sensitivities)
+}))
+ggplot(roc_df, aes(fpr, tpr, colour = model)) + geom_line() + geom_abline(linetype = "dashed") +
+  labs(title = "ROC Curves on the Test Set (BEV = positive)", x = "False positive rate",
+       y = "True positive rate (BEV recall)", colour = NULL) +
+  theme(legend.position = "bottom", legend.direction = "vertical")
+```
+
+**Interpretation.** Test ROC-AUC ranges from `r min(results$test_auc)` to `r max(results$test_auc)`; the
+tree-based models beat logistic regression because the BEV share changes non-linearly with model year.
+
+# 3. Which factors matter?
+
+```{r importance}
+rf <- fits[["Random forest"]]$fit
+set.seed(42)
+te <- test[sample(nrow(test), 20000), ]
+base <- auc_of(te$type, predict(rf, te, type = "prob")[, "BEV"])
+feats <- c(num_cols, cat_cols)
+drops <- sapply(feats, function(f) mean(replicate(3, {
+  s <- te; s[[f]] <- sample(s[[f]]); base - auc_of(te$type, predict(rf, s, type = "prob")[, "BEV"])
+})))
+imp <- data.frame(feature = feats, mean_auc_drop = round(drops, 4)) %>% arrange(desc(mean_auc_drop))
+ggplot(imp, aes(reorder(feature, mean_auc_drop), mean_auc_drop)) + geom_col(fill = "seagreen") + coord_flip() +
+  labs(title = "Random Forest: Permutation Importance", x = "Feature",
+       y = "Drop in test ROC-AUC when the feature is shuffled")
+imp
+
+or <- exp(coef(fits[["Logistic regression"]]$fit))
+round(or[c("model_year", "log_city_evs", grep("^region|^utility", names(or), value = TRUE))], 3)
+```
+
+```{r save}
+write.csv(results, "../report/figures/q1_results_r.csv", row.names = FALSE)
+write.csv(imp, "../report/figures/q1_permutation_importance_r.csv", row.names = FALSE)
+```
+
+# 4. Discussion
+
+The R results agree with Python. Model year is again by far the most important feature (AUC drop
+`r imp$mean_auc_drop[imp$feature == "model_year"]`, against at most
+`r max(imp$mean_auc_drop[imp$feature != "model_year"])` for any location feature), and each standard
+deviation of model year multiplies the odds of a BEV by `r round(or["model_year"], 2)`. Vehicles in the
+Seattle metro have `r round(or["regionSeattle metro"], 2)` times the odds of eastern Washington vehicles,
+much less than in Python (1.29): region and county overlap (each county belongs to one region), and R's
+unpenalized logistic regression attributes the effect to the county terms, whereas scikit-learn's default
+L2 penalty spreads it across both. The overall region effect is the same in the raw data (82.5% BEV in
+the Seattle metro against 75.5% in eastern Washington).
+Location and time predict vehicle type only modestly (AUC about 0.62–0.65); brand and model, excluded on
+purpose, are what really determine it. Small differences from Python come from the different random
+split and the random forest's balanced sampling instead of class weights.
