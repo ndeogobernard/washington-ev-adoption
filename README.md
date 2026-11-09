@@ -1,8 +1,9 @@
 # Electric Vehicle Adoption in Washington State
 
-A personal data-mining project (climate tech) by **Bernard Issifu**, following a university
-data-mining final-project structure: a dataset introduction, then two questions, each with an introduction, methods,
-results and discussion. Every analysis is written in both **Python** and **R**.
+A data science project on electric vehicle adoption across Washington State: whether location and model
+year predict if a registered EV is fully battery-electric, and which adoption profiles exist across ZIP
+codes. It combines classification models with k-means clustering on about 300,000 registered EVs.
+Every analysis is implemented in both **Python** and **R**.
 
 ## Dataset
 

@@ -2,7 +2,6 @@
 title: "Electric Vehicle Adoption in Washington State"
 author: "Bernard Issifu"
 date: "9 November 2026"
-course: "Personal data-mining project (climate tech)"
 no-section-numbers: true
 ---
 

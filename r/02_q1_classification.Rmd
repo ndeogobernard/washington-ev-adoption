@@ -1,6 +1,6 @@
 ---
 title: "Part 2: Question 1, Predicting Battery-Electric vs Plug-in Hybrid"
-subtitle: "Personal project: Electric Vehicle Adoption in Washington State"
+subtitle: "Data science project: Electric Vehicle Adoption in Washington State"
 author: "Bernard Issifu"
 output:
   html_document:

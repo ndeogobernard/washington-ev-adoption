@@ -1,6 +1,6 @@
 ---
 title: "Part 1: Data Preparation and Exploratory Analysis"
-subtitle: "Personal project: Electric Vehicle Adoption in Washington State"
+subtitle: "Data science project: Electric Vehicle Adoption in Washington State"
 author: "Bernard Issifu"
 output:
   html_document:
